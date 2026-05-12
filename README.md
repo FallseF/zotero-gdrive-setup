@@ -6,48 +6,50 @@ ZoteroのPDF添付ファイルをGoogle Drive（または任意のクラウド�
 
 ## 何ができる
 
-- Zotero ConnectorでブラウザからクリックしたPDFが、自動的にGoogle Driveへ移動・リンク化される
-- 既存のローカル保存PDFを一括でGoogle Driveへ移行
-- ファイル名を「Author et al. - Year - Title.pdf」形式に統一
-- Zoteroクラウド有料プラン不要、研究室メンバーでGoogle Drive容量を活用
+- 🌐 Zotero ConnectorでブラウザからクリックしたPDFが、自動的にGoogle Driveへ移動・リンク化される
+- 📦 既存のローカル保存PDFを一括でGoogle Driveへ移行（CLIスクリプト）
+- 🏷 ファイル名を「Author et al. - Year - Title.pdf」形式に統一、カスタマイズも可能
+- 💰 Zoteroクラウド有料プラン不要、研究室メンバーでGoogle Drive容量を活用
 
-## 仕組み
+---
+
+## 📍 自分のユースケースは？
+
+| やりたいこと | 使うもの |
+|---|---|
+| **新規追加されるPDFを自動でDrive送り** | GUIのみ（[セットアップ手順](#-セットアップgui)） |
+| **新規追加時のファイル名を統一** | GUIのみ（Zoteroのrename template設定） |
+| **既存の数百〜数千件をDriveへ移行** | CLI `migrate_to_drive.py` |
+| **既存ファイル名を全部統一フォーマットへ** | CLI `rename_attachments.py` |
+| **dry-runで影響範囲を事前確認** | CLI |
+| **命名ロジックをカスタマイズ（CiteKey風等）** | CLI（`scripts/filenames.py`を編集） |
+| **CI/cron組み込みで自動運用** | CLI |
+
+GUI（ZotMoov + Zotero標準）で日常運用は完結します。CLIは**バッチ処理 / カスタム命名 / 監査ログ**が要るとき真価が出ます。
+
+---
+
+## 🏗 仕組み
 
 ```
 [ブラウザ]                    [Zotero]                        [Google Drive]
    │                            │                                  │
    │ 1. Connectorクリック       │                                  │
    │ ───────────────────────► │ 2. PDF取得＋メタデータ保存       │
-   │                            │ 3. 自動リネーム（標準機能）       │
+   │                            │ 3. 自動リネーム（テンプレ適用）   │
    │                            │ 4. ZotMoovが移動＋リンク化       │
    │                            │ ─────────────────────────────► │
    │                            │                                  │ 5. クラウド保存
    │                            │ 6. Zotero項目は「リンク添付」    │
 ```
 
-DBはローカル、PDF本体はGoogle Drive。Zoteroは参照（リンク）だけ持つ構造。
-
-## 動作環境
-
-- **動作確認済**: macOS 14+ / Zotero 7+ / Python 3.9+
-- **未検証だが理論上動く**: macOS の Python 3.9-3.12
-- **CIで検証**: Linux (Ubuntu) と macOS で Python 3.9-3.12 のスクリプト構文・テスト
-- **未対応**: Windows（`os.path.exists` の Unicode 正規化の差や Drive のマウントパスの違いで実環境動作未検証）
-
-実環境動作はテスト範囲外なので、Windows/Linuxで使う場合は **少数アイテムでdry-runしてから本実行** を強く推奨します。
-
-## 必要なもの
-
-- Zotero 7+
-- [ZotMoov](https://github.com/wileyyugioh/zotmoov) プラグイン
-- Google Drive for desktop（あるいは同期マウントされたクラウドストレージ）
-- Python 3.9+（スクリプト使う場合のみ、stdlib のみ依存）
+DBはローカル、PDF本体はGoogle Drive。Zoteroは参照（リンク）だけ持つ構造。Zoteroクラウドのストレージ枠を一切食わない。
 
 ---
 
-## セットアップ手順（GUI推奨版）
+## 🚀 セットアップ（GUI）
 
-ほとんどのユーザーはこの手順だけで完結します。スクリプト不要。
+これだけで新規追加の自動化までは完結します。
 
 ### 1. ZotMoovインストール
 
@@ -62,11 +64,17 @@ DBはローカル、PDF本体はGoogle Drive。Zoteroは参照（リンク）だ
 
 macOS: `/Users/<USERNAME>/Library/CloudStorage/GoogleDrive-<EMAIL>/マイドライブ/Zotero`
 
-### 3. Zotero側の設定
+### 3. Zotero設定
+
+**Settings → Sync → File Syncing**
+
+- 「Sync attachment files in My Library using」**チェックを外す**（Zoteroクラウドへのアップを止める。これ忘れると無料300MB枠を食う）
+- 「Sync attachment files in group libraries using」も外す
+- Data Syncingは有効のまま（メタデータsyncは継続）
 
 **Settings → Advanced → Files and Folders**
 
-- 「Linked Attachments」セクションの **Base directory** に 上記Google Driveパスを設定
+- 「Linked Attachments」セクションの **Base directory** に上記Google Driveパスを設定
 
 **Settings → ZotMoov**
 
@@ -89,31 +97,93 @@ macOS: `/Users/<USERNAME>/Library/CloudStorage/GoogleDrive-<EMAIL>/マイドラ�
 
 ### 5. 動作確認
 
-ブラウザでPDFを開いてZotero Connectorをクリック。数秒後にGoogle Drive側にファイルが現れたらOK。
+ブラウザでPDFを開いてZotero Connectorをクリック。10秒ほどでGoogle Drive側にファイルが現れたらOK。
 
 ---
 
-## 既存ファイルの一括処理（GUI版）
+## 🧰 CLIツールの真価
 
-ZotMoovインストール後、既存のローカルPDFも一括移行できる：
+CLIは「新規追加の自動化」のためのものではない（GUIで十分）。
+**既存ライブラリの一括処理・命名ロジックのカスタマイズ・予測可能な大量変更**のための道具です。
 
-1. Zoteroの「My Library」を選択
-2. `Cmd+A` で全選択
-3. 右クリック → **Manage Attachments → ZotMoov: Move Selected Items**
-4. 完了後、リンク添付化されGoogle Driveに移動
+### 強み1: ファイル名生成ロジックが純粋関数
 
-ファイル名の一括リネーム:
+`scripts/filenames.py` に切り出された `build_filename` は副作用ナシの純粋関数：
 
-1. 全選択した状態で
-2. 右クリック → **Rename File from Parent Metadata**
+```python
+build_filename(
+    title="Ultrafast small-scale soft electromagnetic robots",
+    date="2022-01-15",
+    authors=["Mao", "Smith", "Brown"],
+    max_title_len=100,
+    sep=" - ",
+) → "Mao et al. - 2022 - Ultrafast small-scale soft electromagnetic robots.pdf"
+```
+
+これによって：
+
+- **36件のユニットテスト**でmacOS/Linux × Python 3.9-3.12 のCIに乗っとる
+- **`config.json` 一発で命名フォーマット変更可能**：`"separator": "_"` → 全部 `Author_Year_Title.pdf` に
+- **命名ロジック自体の差し替えが容易**：Better BibTeX風 `mao2022ultrafast.pdf` を作りたい等
+- **エッジケース対応がZotero標準より細かい**:
+  - Windows予約名（CON, AUX等を `_CON` に prefix）
+  - Unicode NFC正規化（macOS NFD ↔ Windows NFC の不一致を排除）
+  - 制御文字（NUL, ESC等）の除去
+  - 末尾ピリオドの保持と最終クリーンアップの両立（"Smith et al." は維持、"Title."→ "Title"）
+  - 自由形式の date 文字列からのロバストな年抽出（"April 15, 2023" "(2022)" "1999-2003" 等）
+
+### 強み2: dry-runで未来が見える
+
+```bash
+$ python3 rename_attachments.py
+[DRY-RUN] 対象: 90件のリンク添付PDF
+
+=== プレビュー (最初の15件) ===
+  itemID=420
+    BEFORE: Zhu et al. - 2024 - High-speed flexible NIR photodiode.pdf
+    AFTER : Zhu et al. - 2023 - High-speed flexible NIR photodiode.pdf
+    （メタデータ修正で年が変わる）
+  ...
+
+=== 結果 ===
+  リネーム対象: 56件
+  既に同名で変更不要: 33件
+  メタデータ不足でスキップ: 1件   ← itemID=475 を後で手動修正、と分かる
+  ファイル名衝突でスキップ: 0件
+```
+
+Zotero GUIの「Rename File from Parent Metadata」は押した瞬間に走る。CLIは**実行前にプレビュー＋カウントで確信を持って実行できる**。
+
+### 強み3: 安全機構の層が厚い
+
+| 機構 | 詳細 |
+|---|---|
+| dry-run default | `--execute` 明示なしならファイル/DB一切変更ナシ |
+| EXCLUSIVE DBロック | `BEGIN EXCLUSIVE` でZoteroとの同時編集を物理的に拒否 |
+| WAL対応バックアップ | `sqlite3.Connection.backup()` で実行前に自動取得 |
+| copy+verify+unlink | クラウドFUSEのsilent truncationを検出 |
+| 自動ロールバック | ファイル移動成功・DB更新失敗時にファイルを元に戻す |
+| 衝突検出 | 計画フェーズ + 実行直前 + `seen_destinations` set の3層 |
+| schema ID解決 | `fieldID`/`creatorTypeID` を実行時に問い合わせ（環境差対応） |
+| ベースディレクトリ検証 | Zotero data dir内を指定すると即拒否（誤削除防止） |
+
+### 強み4: 監査ログ
+
+GUIは「完了」ぐらいしか教えてくれへんが、CLIは：
+
+```
+=== 結果 ===
+  移動成功: 90件
+  既に移動先に存在: 0件
+  ファイル欠落でスキップ: 115件   ← Sync未完了でローカルに無い分
+  エラー: 0件
+```
+
+何件が何状態かを構造化出力。シェルスクリプトに組み込んでメール通知・Slack通知も可能。
 
 ---
 
-## 上級者向け: スクリプトによる一括処理
-
-GUI操作が面倒、あるいは数千件以上の大量処理をしたい場合のCLIスクリプト。
-
-> ⚠️ **DBを直接編集します。** 自動でバックアップ取得、トランザクション境界明示、失敗時ロールバック等の安全機構は実装してますが、リスクをゼロにはできません。重要なライブラリは事前に手動バックアップを推奨。
+## 🛠 CLIセットアップ
 
 ### 準備
 
@@ -144,39 +214,36 @@ Zoteroを終了してから:
 
 ```bash
 cd scripts
-python3 migrate_to_drive.py             # dry-run（プレビューのみ）
+python3 migrate_to_drive.py             # dry-run
 python3 migrate_to_drive.py --execute   # 本実行
 ```
 
-挙動:
-- `linkMode IN (0, 1)` かつ `contentType = 'application/pdf'` の添付を対象（ゴミ箱を除く）
-- ローカルstorage → クラウドフォルダ（`<storage_key>/<filename>` の構造）
-- DBの `linkMode` を 2 (linked_file) に、`path` を `attachments:...` に更新
-- ファイル移動は **copy → サイズ検証 → unlink** の順で、中断耐性あり
-
-### ファイル名を一括リネーム
+### ファイル名を一括整形
 
 ```bash
 python3 rename_attachments.py             # dry-run
 python3 rename_attachments.py --execute   # 本実行
 ```
 
-挙動:
-- 全てのリンク添付PDF（`linkMode = 2`）を対象
-- 親アイテムのメタデータから `Author et al. - Year - Title.pdf` を生成
-- タイトル欠落のアイテムはスキップ（情報損失防止）
+### 命名ルールのカスタマイズ
 
-### 安全機構
+`scripts/filenames.py` の `build_filename` を編集してテストするだけ：
 
-| 機構 | 詳細 |
-|---|---|
-| dry-run default | `--execute` を明示しない限りファイル/DBに変更しない |
-| EXCLUSIVEロック | `BEGIN EXCLUSIVE` で他プロセス（Zotero）と排他制御 |
-| WAL対応バックアップ | `sqlite3.Connection.backup()` で実行前に自動取得 |
-| 衝突検出 | ファイル名衝突を計画フェーズと実行直前の両方で検出 |
-| ロールバック | ファイル移動成功・DB更新失敗 → 自動でファイルを元に戻す |
-| schema ID解決 | `fieldID`/`creatorTypeID` を実行時に問い合わせ（環境差対応） |
-| ベースディレクトリ検証 | Zoteroデータディレクトリの内側を指定不可（誤削除防止） |
+```bash
+python3 -m unittest tests.test_filenames -v
+```
+
+純粋関数なのでテスト即追加可能。
+
+---
+
+## 動作環境
+
+- **動作確認済**: macOS 14+ / Zotero 7+ / Python 3.9+
+- **CIで検証**: Linux (Ubuntu) と macOS で Python 3.9-3.12 の構文・テスト
+- **未検証**: Windows（path/Drive mountの差で実環境動作未確認）
+
+実環境動作はテスト範囲外なので、Windows/Linuxで使う場合は **少数アイテムでdry-runしてから本実行** を強く推奨。
 
 ---
 
@@ -184,16 +251,13 @@ python3 rename_attachments.py --execute   # 本実行
 
 ### Q. Zoteroで「ファイルが見つからない」と出る
 
-以下を順に確認:
-
 1. Google Driveが同期されているか（オフラインだとファイル取得不可）
 2. Settings → Advanced → Files and Folders の Base directory が正しいか
-3. 該当アイテムのパスが `attachments:<KEY>/<filename>` 形式になっているか
-   - Zoteroで「Show File」→ 表示されるパスを確認
+3. アイテムのパスが `attachments:<filename>` 形式になっているか
 
 ### Q. ZotMoovがインストールできない（"sideload" 警告）
 
-Zotero 7のセキュリティ機能で、初回はGUIから手動承認が必要。Tools → Plugins から該当プラグインを「Enable」する。
+Zotero 7のセキュリティ機能で、初回はGUIから手動承認が必要。Tools → Plugins から該当プラグインを「Enable」。
 
 ### Q. 移行スクリプト実行後、Zoteroで一部アイテムが「missing file」になった
 
@@ -201,24 +265,15 @@ Zotero Sync未完了でローカルに実体がなかった分。Zotero側でSyn
 
 ### Q. ロールバックしたい
 
-バックアップから戻す:
-
 ```bash
-# Zotero終了後
 osascript -e 'tell application "Zotero" to quit'
-
-# DB復元
 cp ~/Zotero_backup_<TIMESTAMP>_pre_migration/zotero.sqlite ~/Zotero/zotero.sqlite
-
-# (必要なら) Google Drive側のファイルもローカルstorage/<KEY>/へ戻す
-# 注意: migrateスクリプトは安全のためcopy+verify+unlinkを使うので、
-# 移動済ファイルはGoogle Drive側にしか存在しない。
-# ローカルに戻すには手動移動が必要。
+# (必要なら) Google Driveからローカルstorage/<KEY>/へファイルを戻す
 ```
 
 ### Q. 標準添付アイテム（Standalone Attachment）が対象外になる
 
-`migrate_to_drive.py` は標準添付（親アイテムなし）も移動するが、`rename_attachments.py` は親メタデータが必須なのでスキップする。Zoteroに親アイテムを追加してから再実行してくれや。
+`rename_attachments.py` は親メタデータが必須なのでスキップする。Zoteroに親アイテムを追加してから再実行。
 
 ---
 
@@ -231,20 +286,19 @@ zotero-gdrive-setup/
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
 ├── pyproject.toml
-├── .gitignore
 ├── .github/
 │   ├── workflows/ci.yml             # GitHub Actions CI
-│   └── ISSUE_TEMPLATE/              # Issue雛形
+│   └── ISSUE_TEMPLATE/
 ├── docs/
-│   └── architecture.md              # 内部構造
+│   └── architecture.md
 ├── scripts/
-│   ├── _common.py                   # 共通処理
-│   ├── filenames.py                 # ファイル名生成（純粋関数）
+│   ├── _common.py                   # 設定/DBロック/バックアップ
+│   ├── filenames.py                 # ファイル名生成（純粋関数、テスタブル）
 │   ├── config.example.json
 │   ├── migrate_to_drive.py
 │   └── rename_attachments.py
 └── tests/
-    └── test_filenames.py            # filenames.py のユニットテスト
+    └── test_filenames.py            # 36件のユニットテスト
 ```
 
 ## ライセンス
@@ -253,10 +307,8 @@ MIT License - 詳細は [LICENSE](./LICENSE) 参照。
 
 ## 免責
 
-このツールはZoteroのSQLiteデータベースを直接編集します。安全機構を実装してますが、データ損失のリスクを完全には排除できません。**重要なライブラリはこのツールを使う前に手動でバックアップしてください。** 本ツールの使用によって生じた損害について作者は責任を負いません。
+このツールはZoteroのSQLiteデータベースを直接編集します。安全機構を実装してますが、データ損失のリスクを完全には排除できません。**重要なライブラリは事前に手動バックアップ推奨**。本ツールの使用によって生じた損害について作者は責任を負いません。
 
 ## 貢献
 
-バグ報告・改善提案は [Issues](https://github.com/FallseF/zotero-gdrive-setup/issues) へ。
-
-詳細は [CONTRIBUTING.md](./CONTRIBUTING.md) を参照。
+バグ報告・改善提案は [Issues](https://github.com/FallseF/zotero-gdrive-setup/issues) へ。詳細は [CONTRIBUTING.md](./CONTRIBUTING.md)。
