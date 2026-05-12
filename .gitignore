@@ -1,0 +1,24 @@
+# User-specific config (contains personal paths/email)
+scripts/config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test/scratch
+*.log
+*.bak

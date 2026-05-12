@@ -1,0 +1,10 @@
+{
+  "zotero_data_dir": "~/Zotero",
+  "linked_attachments_base_dir": "~/Library/CloudStorage/GoogleDrive-YOUR_EMAIL@gmail.com/マイドライブ/Zotero",
+  "rename_template": {
+    "format": "{author} - {year} - {title}",
+    "title_max_length": 100,
+    "separator": " - "
+  },
+  "_comment": "Copy this file to config.json and edit paths to match your environment. The base directory must already exist before running migration."
+}
