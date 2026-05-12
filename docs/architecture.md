@@ -7,7 +7,7 @@ Zoteroの `itemAttachments` テーブルには、各添付ファイルの `linkM
 | linkMode | 名称 | 意味 |
 |---|---|---|
 | 0 | imported_file | 手動で追加されたローカル保存ファイル |
-| 1 | imported_url | Connector等経由で保存されたファイル（PDFスナップショット） |
+| 1 | imported_url | Connector等経由で保存されたファイル |
 | 2 | linked_file | リンク添付（ファイル本体は外部、Zoteroは参照のみ） |
 | 3 | linked_url | Webリンク（ローカルファイルなし） |
 
@@ -18,38 +18,75 @@ Zoteroの `itemAttachments` テーブルには、各添付ファイルの `linkM
 - `linkMode = 2` (絶対パス): `/Users/.../full/path.pdf`
 - `linkMode = 3`: URL文字列
 
-## 本ツールの動作原理
+## モジュール構成
 
-### `migrate_to_drive.py`
+```
+scripts/
+├── _common.py       # 設定/環境バリデーション、DBロック、バックアップ、schema ID解決
+├── filenames.py     # 純粋関数: sanitize, extract_year, first_creator_string, build_filename
+├── migrate_to_drive.py   # storage → linked 移行（DB＋ファイル）
+└── rename_attachments.py # 既存リンク添付のファイル名整形（DB＋ファイル）
+```
 
-1. `itemAttachments` から `linkMode IN (0, 1) AND contentType = 'application/pdf'` を抽出
-2. 各アイテムについて:
-   - `<dataDir>/storage/<key>/<filename>` を `<baseDir>/<key>/<filename>` に移動
-   - DBの `linkMode = 2`、`path = 'attachments:<key>/<filename>'` に更新
-3. 空になった `storage/<key>/` ディレクトリは削除
+純粋関数は `filenames.py` に隔離し、`tests/` で単体テスト可能にしている。
+
+## `migrate_to_drive.py` の動作
+
+1. config を読み、環境（パス存在、base_dir が data_dir の外）を検証
+2. `BEGIN EXCLUSIVE` で DB ロックを取得（Zotero起動中ならここで失敗）
+3. `sqlite3.Connection.backup()` で WAL対応バックアップを取得
+4. 対象クエリ実行（`linkMode IN (0, 1) AND contentType = 'application/pdf'`、ゴミ箱除外）
+5. 各行に対して:
+   a. `safe_copy_and_unlink`: 一時ファイルへコピー → サイズ検証 → リネーム → 元削除
+   b. DB更新: `linkMode = 2`、`path = 'attachments:<key>/<filename>'`
+   c. DB更新失敗時は `safe_copy_and_unlink` を逆向きに走らせてロールバック
+   d. ソースディレクトリが空（hidden ファイル除く）なら削除
+6. 全件処理後に `conn.commit()`
 
 storage_key単位でサブディレクトリを維持する理由:
-- ファイル名衝突を完全回避（複数論文で同じファイル名は珍しくない）
-- Zotero標準storage構造との対称性を保ち、ロールバックが容易
+- ファイル名衝突を完全回避
+- Zotero標準storage構造との対称性
+- ロールバック容易
 
-### `rename_attachments.py`
+DB path に POSIX区切り（`/`）を使う理由:
+- Zotero内部は `/` 区切りで扱われる（Windowsでも `\` ではなく `/`）
+- `posixpath.join` を明示的に使ってクロスプラットフォーム整合性確保
 
-1. `linkMode = 2 AND contentType = 'application/pdf'` を抽出
-2. 各アイテムの親アイテムからメタデータ取得:
-   - title (`fieldID = 1`)
-   - date (`fieldID = 6`)
-   - authors (`itemCreators.creatorTypeID = 10`)
-3. ファイル名を生成: `<firstCreator> - <year> - <title>.pdf`
-4. ファイル名サニタイズ:
-   - 不正文字 (`/ \ : ? * " < > |`) を除去/置換
-   - 連続空白を単一空白に
-   - title を100文字で切り詰め
-5. ファイル名衝突がない場合のみ、ファイル移動＋DB更新
+## `rename_attachments.py` の動作
 
-firstCreator のフォーマット:
-- 1人: `Smith`
-- 2人: `Smith and Jones`
-- 3人以上: `Smith et al.`
+1. config 読み、環境検証、DBロック、バックアップ
+2. `resolve_schema_ids()` で `fieldID(title)`, `fieldID(date)`, `creatorTypeID(author)` を実行時取得
+3. 対象クエリ実行（`linkMode = 2 AND contentType = 'application/pdf'`、ゴミ箱除外）
+4. 計画フェーズ:
+   - 各行で親メタデータ取得、`build_filename` で新ファイル名生成
+   - title 欠落・衝突などをスキップ判定
+   - `planned_destinations` set で計画内重複も検出
+5. 実行フェーズ（`--execute` 時のみ）:
+   - `safe_rename`: 同一FSなら `os.rename`、跨る場合は copy+verify+unlink
+   - DB更新失敗時は逆方向リネームでロールバック
+
+## 安全機構
+
+| 機構 | 実装 | 防げる失敗 |
+|---|---|---|
+| dry-run default | `--execute` opt-in | 誤実行 |
+| EXCLUSIVEロック | `BEGIN EXCLUSIVE` | Zoteroとの同時編集 |
+| WAL対応バックアップ | `Connection.backup()` | 古いWALの紛失 |
+| 衝突検出 | 計画フェーズ + 実行直前 + `seen_destinations` | ファイル上書き |
+| copy+verify+unlink | `safe_copy_and_unlink` | クラウドFUSEのsilent truncation |
+| ロールバック | DB更新失敗時に逆方向移動 | FS/DB のdesync |
+| schema ID解決 | `resolve_schema_ids` | 環境差によるID不整合 |
+| ベースディレクトリ検証 | `relative_to` チェック | data_dir 内誤指定 |
+| Unicode NFC正規化 | `unicodedata.normalize("NFC")` | macOS/Windows間の不一致 |
+| Windows予約名回避 | `is_windows_reserved` で `_` prefix | CON/AUX等のクラッシュ |
+| 制御文字除去 | `[\x00-\x1f\x7f-\x9f]` | embedded null byte |
+
+## 既知の限界
+
+- **Standalone attachment（親なし）**: migrate は移動するが rename はメタデータ無いのでスキップ
+- **arXiv IDの埋め込み年**: `extract_year` は最初の有効年を取るが、`"arXiv 2305.12345 (2024)"` のような曖昧文字列では誤抽出の可能性
+- **NFD/NFC片付け**: 既存ファイル名がmacOS APFS上でNFDで保存されている場合、planning フェーズの conflict 検出が見逃す可能性（実害は薄いが完全に閉じてはいない）
+- **大量のWAL diff**: バックアップは `sqlite3.Connection.backup()` を使うので問題ないが、source DBのWALが極端に大きい状態（数GB）だとバックアップに時間がかかる
 
 ## なぜZoteroのGUIではなく直接DB操作するか
 
@@ -61,30 +98,3 @@ ZotMoovとZotero標準機能でほぼ同じことができる。本スクリプ�
 - **ロールバック容易**: バックアップが自動取得される
 
 ただし、GUI操作の方が安全であることに変わりはない。一般ユーザーにはGUI手順を推奨。
-
-## なぜ ZotMoov の Move Selected Items を呼ばない？
-
-ZotMoovのJSはZotero内部から呼ばれることを前提としており、外部Pythonからは触れない。CLI連携APIも提供されていない。
-
-代替案として:
-- Zoteroの `--purgeCaches` のような起動時オプションで自動移行を仕込む → そんなオプションは存在しない
-- Zoteroをheadless起動して JavaScript Run → 公式に対応していない
-
-結果として、外部スクリプトからの直接DB操作が最も実用的なアプローチとなる。
-
-## 安全機構
-
-| 機構 | 実装 |
-|---|---|
-| Zotero起動中チェック | `pgrep -i zotero` で確認、起動中なら実行拒否 |
-| DBバックアップ | `--execute` 時に必ず `Zotero_backup_<TIMESTAMP>_<label>/` を作成 |
-| dry-run デフォルト | `--execute` を明示しない限りファイル・DBに変更を加えない |
-| 衝突回避 | 移動先ファイルが既存の場合はスキップ |
-| メタデータ欠落チェック | title が空のアイテムはリネームをスキップ（情報損失防止） |
-| ゴミ箱除外 | `deletedItems` テーブルにあるアイテムは対象外 |
-
-## 想定リスク
-
-- **Google Drive非同期時の挙動**: マウントされていない状態で実行するとファイル移動が失敗する。スクリプトは事前にbase directoryの存在をチェックする。
-- **Zotero Syncとの相互作用**: Zoteroクラウドへのファイル同期を有効にしている場合、リンク添付はクラウドへアップロードされない。これは想定された挙動。
-- **複数端末での共有**: 同じGoogle Driveを別の端末でも参照する場合、Zoteroのライブラリ自体もSyncで同期する必要がある。本ツールはローカルDB操作のみ。

@@ -1,34 +1,62 @@
 #!/usr/bin/env python3
 """
-Zoteroのローカル保存PDFをGoogle Drive（または任意のクラウドフォルダ）へ
-一括移行し、リンク添付に変換する。
+Zoteroのローカル保存PDFを Google Drive 等のクラウドフォルダへ移行し、
+リンク添付に変換するスクリプト。
 
 使い方:
-    python3 migrate_to_drive.py            # dry-run（プレビューのみ）
+    python3 migrate_to_drive.py            # dry-run
     python3 migrate_to_drive.py --execute  # 本実行
 
 事前準備:
     1. scripts/config.json を作成（config.example.json をコピーして編集）
-    2. Zoteroを終了
-    3. Zotero側の Linked Attachments Base Directory も同じパスに設定済みであること
-
-このスクリプトは zotero.sqlite を直接編集します。実行前に必ずバックアップを取ります。
+    2. Zotero側の Linked Attachments Base Directory を config と同じパスに設定
+    3. Zoteroを終了
 """
 import argparse
 import os
+import posixpath
 import shutil
-import sqlite3
 import sys
+from pathlib import Path
+
+# 親ディレクトリ内のモジュールをインポート可能にする
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _common import (
     backup_database,
-    check_zotero_not_running,
+    err_exit,
     load_config,
+    open_db_with_exclusive_lock,
     validate_environment,
+    verify_zotero_base_attachment_path,
 )
 
 
-def main():
+def safe_copy_and_unlink(src: str, dst: str) -> None:
+    """copy → サイズ確認 → unlink(src) の順で安全にファイル移動.
+
+    クラウドFUSEでの silent truncation や、移動中の中断によるデータ消失を防ぐ。
+    """
+    src_size = os.path.getsize(src)
+    tmp_dst = dst + ".part"
+
+    shutil.copy2(src, tmp_dst)
+    try:
+        with open(tmp_dst, "rb") as f:
+            os.fsync(f.fileno())
+    except OSError:
+        pass  # FUSE等でfsyncが効かない場合は無視
+
+    dst_size = os.path.getsize(tmp_dst)
+    if dst_size != src_size:
+        os.unlink(tmp_dst)
+        raise IOError(f"サイズ不一致: src={src_size} dst={dst_size}")
+
+    os.rename(tmp_dst, dst)
+    os.unlink(src)
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true",
                         help="本実行（指定なしならdry-run）")
@@ -39,24 +67,19 @@ def main():
     cfg = load_config(args.config)
     validate_environment(cfg)
 
-    if args.execute:
-        check_zotero_not_running()
-        backup_database(cfg["zotero_data_dir"], label="pre_migration")
-
     storage_dir = os.path.join(cfg["zotero_data_dir"], "storage")
     db_path = os.path.join(cfg["zotero_data_dir"], "zotero.sqlite")
     base_dir = cfg["linked_attachments_base_dir"]
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    if args.execute:
+        backup_database(cfg["zotero_data_dir"], label="pre_migration")
+
+    conn = open_db_with_exclusive_lock(db_path)
     cur = conn.cursor()
+    verify_zotero_base_attachment_path(cur, base_dir)
 
     cur.execute("""
-        SELECT
-            ia.itemID,
-            i.key as storageKey,
-            ia.path,
-            ia.contentType
+        SELECT ia.itemID, i.key as storageKey, ia.path
         FROM itemAttachments ia
         JOIN items i ON ia.itemID = i.itemID
         LEFT JOIN deletedItems di ON ia.itemID = di.itemID
@@ -75,12 +98,13 @@ def main():
         for r in rows[:5]:
             filename = r["path"][len("storage:"):]
             src = os.path.join(storage_dir, r["storageKey"], filename)
-            exists = "✓" if os.path.exists(src) else "✗欠落"
-            print(f"  [{exists}] itemID={r['itemID']} key={r['storageKey']}")
+            mark = "✓" if os.path.exists(src) else "欠落"
+            print(f"  [{mark}] itemID={r['itemID']} key={r['storageKey']}")
             print(f"        file={filename[:80]}")
         print()
 
     stats = {"moved": 0, "skipped_missing": 0, "already_at_dst": 0, "errors": []}
+    seen_destinations = set()
 
     for idx, r in enumerate(rows, 1):
         item_id = r["itemID"]
@@ -93,34 +117,51 @@ def main():
         if not os.path.exists(src):
             stats["skipped_missing"] += 1
             continue
-        if os.path.exists(dst):
+        if os.path.exists(dst) or dst in seen_destinations:
             stats["already_at_dst"] += 1
             continue
         if not args.execute:
+            seen_destinations.add(dst)
             stats["moved"] += 1
             continue
 
         try:
             os.makedirs(dst_dir, exist_ok=True)
-            shutil.move(src, dst)
+            safe_copy_and_unlink(src, dst)
+            seen_destinations.add(dst)
+        except Exception as e:
+            stats["errors"].append((item_id, filename, f"ファイル移動失敗: {e}"))
+            continue
+
+        # ファイル移動成功後にDB更新。失敗したら即座にファイルを戻す
+        try:
+            db_path_value = "attachments:" + posixpath.join(key, filename)
             cur.execute(
                 "UPDATE itemAttachments SET linkMode = 2, path = ? WHERE itemID = ?",
-                (f"attachments:{key}/{filename}", item_id),
+                (db_path_value, item_id),
             )
             stats["moved"] += 1
-
-            src_parent = os.path.join(storage_dir, key)
-            try:
-                if not os.listdir(src_parent):
-                    os.rmdir(src_parent)
-            except OSError:
-                pass
-
-            if idx % 25 == 0:
-                conn.commit()
-                print(f"  進捗: {idx}/{len(rows)} ({stats['moved']}件移動済)")
         except Exception as e:
-            stats["errors"].append((item_id, filename, str(e)))
+            try:
+                safe_copy_and_unlink(dst, src)
+            except Exception as rb_err:
+                stats["errors"].append((item_id, filename,
+                                       f"DB更新失敗かつロールバックも失敗: {e} / {rb_err}"))
+            else:
+                stats["errors"].append((item_id, filename, f"DB更新失敗（ロールバック済）: {e}"))
+            continue
+
+        # 空になった source key dir を片付け（hidden file が残ってる場合は触らない）
+        src_parent = os.path.join(storage_dir, key)
+        try:
+            remaining = [n for n in os.listdir(src_parent) if not n.startswith(".")]
+            if not remaining:
+                shutil.rmtree(src_parent, ignore_errors=True)
+        except OSError:
+            pass
+
+        if idx % 10 == 0 and args.execute:
+            print(f"  進捗: {idx}/{len(rows)} ({stats['moved']}件移動済)")
 
     if args.execute:
         conn.commit()
@@ -140,6 +181,8 @@ def main():
     if not args.execute:
         print("\n💡 dry-runでした。問題なければ --execute で本実行してくれや。")
 
+    return 0 if not stats["errors"] else 2
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
