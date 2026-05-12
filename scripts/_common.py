@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 # Windows cp932環境でも非ASCII文字（"へん"等）を安全に出力するためUTF-8強制
 if hasattr(sys.stdout, "reconfigure"):
@@ -46,7 +46,7 @@ def resolve_schema_ids(cur: sqlite3.Cursor) -> SchemaIds:
     )
 
 
-def load_config(config_path: Optional[str] = None) -> Dict:
+def load_config(config_path: Optional[str] = None) -> dict:
     if config_path is None:
         config_path = os.path.join(os.path.dirname(__file__), "config.json")
     if not os.path.exists(config_path):
@@ -75,7 +75,7 @@ def load_config(config_path: Optional[str] = None) -> Dict:
     return cfg
 
 
-def validate_environment(cfg: Dict) -> None:
+def validate_environment(cfg: dict) -> None:
     zotero_dir = Path(cfg["zotero_data_dir"]).resolve()
     if not zotero_dir.is_dir():
         err_exit(f"Zoteroデータディレクトリが存在しまへん: {zotero_dir}")

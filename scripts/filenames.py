@@ -1,8 +1,7 @@
 """ファイル名生成・サニタイズの純粋関数群（テスタブル）."""
 import re
 import unicodedata
-from typing import List, Optional
-
+from typing import Optional
 
 # ファイルシステムで違法/問題のある文字を置換または除去
 _FILENAME_TRANSLATIONS = str.maketrans({
@@ -61,7 +60,7 @@ def extract_year(date_str: Optional[str]) -> str:
     if not date_str:
         return ""
 
-    candidates: List[str] = []
+    candidates: list[str] = []
     m = _YEAR_AT_START.match(date_str)
     if m:
         candidates.append(m.group(1))
@@ -74,7 +73,7 @@ def extract_year(date_str: Optional[str]) -> str:
     return ""
 
 
-def first_creator_string(authors: List[str]) -> str:
+def first_creator_string(authors: list[str]) -> str:
     """Zoteroの 'firstCreator' 風の表記を生成.
 
     - 1人: "Smith"
@@ -99,7 +98,7 @@ def is_windows_reserved(basename: str) -> bool:
 def build_filename(
     title: Optional[str],
     date: Optional[str],
-    authors: List[str],
+    authors: list[str],
     max_title_len: int = 100,
     sep: str = " - ",
     extension: str = ".pdf",

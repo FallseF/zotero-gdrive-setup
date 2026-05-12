@@ -15,27 +15,24 @@ import os
 import posixpath
 import shutil
 import sys
-from pathlib import Path
-from typing import List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _common import (
+    SchemaIds,
     backup_database,
-    err_exit,
     load_config,
     open_db_with_exclusive_lock,
     resolve_schema_ids,
     validate_environment,
     verify_zotero_base_attachment_path,
-    SchemaIds,
 )
 from filenames import build_filename
 
 PREVIEW_N = 15
 
 
-def get_parent_metadata(cur, parent_id: int, ids: SchemaIds) -> Tuple[str, str, List[str]]:
+def get_parent_metadata(cur, parent_id: int, ids: SchemaIds) -> tuple[str, str, list[str]]:
     if not parent_id:
         return ("", "", [])
 
@@ -92,7 +89,7 @@ def safe_rename(src: str, dst: str) -> None:
     shutil.copy2(src, tmp_dst)
     if os.path.getsize(tmp_dst) != src_size:
         os.unlink(tmp_dst)
-        raise IOError("コピー後サイズ不一致")
+        raise OSError("コピー後サイズ不一致")
     os.rename(tmp_dst, dst)
     os.unlink(src)
 
@@ -135,7 +132,7 @@ def main() -> int:
     mode = "EXECUTE" if args.execute else "DRY-RUN"
     print(f"\n[{mode}] 対象: {len(rows)}件のリンク添付PDF\n")
 
-    plan: List[Tuple[int, str, str]] = []
+    plan: list[tuple[int, str, str]] = []
     stats = {
         "renamed": 0, "no_change": 0, "no_metadata": 0,
         "missing_file": 0, "conflict": 0, "errors": [],

@@ -17,14 +17,12 @@ import os
 import posixpath
 import shutil
 import sys
-from pathlib import Path
 
 # 親ディレクトリ内のモジュールをインポート可能にする
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _common import (
     backup_database,
-    err_exit,
     load_config,
     open_db_with_exclusive_lock,
     validate_environment,
@@ -50,7 +48,7 @@ def safe_copy_and_unlink(src: str, dst: str) -> None:
     dst_size = os.path.getsize(tmp_dst)
     if dst_size != src_size:
         os.unlink(tmp_dst)
-        raise IOError(f"サイズ不一致: src={src_size} dst={dst_size}")
+        raise OSError(f"サイズ不一致: src={src_size} dst={dst_size}")
 
     os.rename(tmp_dst, dst)
     os.unlink(src)
